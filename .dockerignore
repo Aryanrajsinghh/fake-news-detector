@@ -1,0 +1,9 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+.venv/
+.env
+models/bert-fake-news/checkpoints/
