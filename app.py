@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,19 +26,24 @@ FAKE_INDICATOR_WORDS = {
 
 
 @st.cache_resource(show_spinner=False)
-def load_model() -> Tuple[AutoTokenizer, AutoModelForSequenceClassification, torch.device]:
+def load_model() -> Tuple[Optional[AutoTokenizer], Optional[AutoModelForSequenceClassification], Optional[torch.device], str, Optional[str]]:
     model_path = Path(MODEL_DIR)
     if not model_path.exists():
-        raise FileNotFoundError(
-            f"Model directory '{MODEL_DIR}' not found. Train first with train_bert.py or set MODEL_DIR."
+        return None, None, None, "heuristic", (
+            f"Model directory '{MODEL_DIR}' not found."
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    return tokenizer, model, device
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, local_files_only=True)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        model.eval()
+        return tokenizer, model, device, "bert", None
+    except Exception as exc:
+        return None, None, None, "heuristic", (
+            f"Model artifacts at '{MODEL_DIR}' are incomplete or unreadable ({exc})."
+        )
 
 
 def init_db() -> None:
@@ -106,22 +111,36 @@ def preprocess_text(text: str) -> str:
     return text
 
 
-def predict_news(text: str, tokenizer, model, device) -> Dict[str, float]:
-    encoded = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=256,
-    )
-    encoded = {k: v.to(device) for k, v in encoded.items()}
+def heuristic_prediction(text: str) -> Tuple[float, float]:
+    lowered = text.lower()
+    matched = sum(1 for phrase in FAKE_INDICATOR_WORDS if phrase in lowered)
+    exclamation_boost = min(lowered.count("!") * 0.03, 0.15)
+    base_fake = min(0.2 + (matched * 0.15) + exclamation_boost, 0.95)
+    fake_p = float(base_fake)
+    real_p = float(1 - fake_p)
+    return real_p, fake_p
 
-    with torch.no_grad():
-        outputs = model(**encoded)
-        probs = torch.softmax(outputs.logits, dim=1).cpu().numpy()[0]
 
-    # Convention in train_bert.py: 0 = real, 1 = fake
-    real_p, fake_p = float(probs[0]), float(probs[1])
+def predict_news(text: str, tokenizer, model, device, backend: str) -> Dict[str, float]:
+    if backend == "bert":
+        encoded = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=256,
+        )
+        encoded = {k: v.to(device) for k, v in encoded.items()}
+
+        with torch.no_grad():
+            outputs = model(**encoded)
+            probs = torch.softmax(outputs.logits, dim=1).cpu().numpy()[0]
+
+        # Convention in train_bert.py: 0 = real, 1 = fake
+        real_p, fake_p = float(probs[0]), float(probs[1])
+    else:
+        real_p, fake_p = heuristic_prediction(text)
+
     label = "FAKE" if fake_p >= real_p else "REAL"
     confidence = max(fake_p, real_p)
     return {
@@ -152,10 +171,11 @@ def build_wordcloud(texts: List[str]):
     return fig
 
 
-def chat_response(user_message: str, tokenizer, model, device) -> str:
-    prediction = predict_news(user_message, tokenizer, model, device)
+def chat_response(user_message: str, tokenizer, model, device, backend: str) -> str:
+    prediction = predict_news(user_message, tokenizer, model, device, backend)
+    mode_note = "BERT" if backend == "bert" else "Heuristic fallback"
     return (
-        f"BERT analysis: This text is **{prediction['label']}** with "
+        f"{mode_note} analysis: This text is **{prediction['label']}** with "
         f"**{prediction['confidence']*100:.2f}%** confidence.\n\n"
         f"Fake probability: {prediction['fake_probability']*100:.2f}% | "
         f"Real probability: {prediction['real_probability']*100:.2f}%"
@@ -169,11 +189,13 @@ def main() -> None:
 
     init_db()
 
-    try:
-        tokenizer, model, device = load_model()
-    except Exception as exc:
-        st.error(str(exc))
-        st.stop()
+    tokenizer, model, device, backend, model_warning = load_model()
+
+    if backend == "heuristic":
+        st.warning(
+            "Running in heuristic fallback mode. "
+            f"{model_warning} Train with train_bert.py or set MODEL_DIR to enable BERT inference."
+        )
 
     left_col, right_col = st.columns([2, 1])
 
@@ -190,7 +212,7 @@ def main() -> None:
             if not cleaned:
                 st.warning("Please enter some text first.")
             else:
-                pred = predict_news(cleaned, tokenizer, model, device)
+                pred = predict_news(cleaned, tokenizer, model, device, backend)
                 log_prediction(
                     cleaned,
                     pred["label"],
@@ -222,9 +244,9 @@ def main() -> None:
         user_prompt = st.chat_input("Ask: Is this fake? Paste text and press Enter...")
         if user_prompt:
             st.session_state.chat_messages.append(("user", user_prompt))
-            answer = chat_response(user_prompt, tokenizer, model, device)
+            answer = chat_response(user_prompt, tokenizer, model, device, backend)
             st.session_state.chat_messages.append(("assistant", answer))
-            pred = predict_news(user_prompt, tokenizer, model, device)
+            pred = predict_news(user_prompt, tokenizer, model, device, backend)
             log_prediction(user_prompt, pred["label"], pred["confidence"], pred["fake_probability"], pred["real_probability"])
             st.rerun()
 
