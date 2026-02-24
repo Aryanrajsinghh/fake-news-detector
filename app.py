@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -20,18 +19,32 @@ DB_PATH = os.getenv("SQLITE_PATH", "predictions.db")
 MAX_LOG_ROWS = 500
 
 FAKE_INDICATOR_WORDS = {
-    "shocking", "secret", "hoax", "conspiracy", "exposed", "click here", "miracle",
-    "unbelievable", "urgent", "they don't want you to know", "viral", "breaking"
+    "shocking",
+    "secret",
+    "hoax",
+    "conspiracy",
+    "exposed",
+    "click here",
+    "miracle",
+    "unbelievable",
+    "urgent",
+    "they don't want you to know",
+    "viral",
+    "breaking",
 }
 
 
 @st.cache_resource(show_spinner=False)
-def load_model() -> Tuple[Optional[AutoTokenizer], Optional[AutoModelForSequenceClassification], Optional[torch.device], str, Optional[str]]:
+def load_model() -> Tuple[
+    Optional[AutoTokenizer],
+    Optional[AutoModelForSequenceClassification],
+    Optional[torch.device],
+    str,
+    Optional[str],
+]:
     model_path = Path(MODEL_DIR)
     if not model_path.exists():
-        return None, None, None, "heuristic", (
-            f"Model directory '{MODEL_DIR}' not found."
-        )
+        return None, None, None, "heuristic", f"Model directory '{MODEL_DIR}' not found."
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
@@ -41,9 +54,8 @@ def load_model() -> Tuple[Optional[AutoTokenizer], Optional[AutoModelForSequence
         model.eval()
         return tokenizer, model, device, "bert", None
     except Exception as exc:
-        return None, None, None, "heuristic", (
-            f"Model artifacts at '{MODEL_DIR}' are incomplete or unreadable ({exc})."
-        )
+        warning = f"Model artifacts at '{MODEL_DIR}' are incomplete or unreadable ({exc})."
+        return None, None, None, "heuristic", warning
 
 
 def init_db() -> None:
@@ -107,8 +119,7 @@ def fetch_logs(limit: int = 100) -> pd.DataFrame:
 
 
 def preprocess_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def heuristic_prediction(text: str) -> Tuple[float, float]:
@@ -176,9 +187,9 @@ def chat_response(user_message: str, tokenizer, model, device, backend: str) -> 
     mode_note = "BERT" if backend == "bert" else "Heuristic fallback"
     return (
         f"{mode_note} analysis: This text is **{prediction['label']}** with "
-        f"**{prediction['confidence']*100:.2f}%** confidence.\n\n"
-        f"Fake probability: {prediction['fake_probability']*100:.2f}% | "
-        f"Real probability: {prediction['real_probability']*100:.2f}%"
+        f"**{prediction['confidence'] * 100:.2f}%** confidence.\n\n"
+        f"Fake probability: {prediction['fake_probability'] * 100:.2f}% | "
+        f"Real probability: {prediction['real_probability'] * 100:.2f}%"
     )
 
 
@@ -188,7 +199,6 @@ def main() -> None:
     st.caption("BERT-powered fake news classifier with chat analysis, word cloud, and SQLite logging.")
 
     init_db()
-
     tokenizer, model, device, backend, model_warning = load_model()
 
     if backend == "heuristic":
@@ -222,7 +232,7 @@ def main() -> None:
                 )
                 badge = "🚨 Likely FAKE" if pred["label"] == "FAKE" else "✅ Likely REAL"
                 st.markdown(f"### {badge}")
-                st.metric("Confidence", f"{pred['confidence']*100:.2f}%")
+                st.metric("Confidence", f"{pred['confidence'] * 100:.2f}%")
 
                 probs_df = pd.DataFrame(
                     {
@@ -247,7 +257,13 @@ def main() -> None:
             answer = chat_response(user_prompt, tokenizer, model, device, backend)
             st.session_state.chat_messages.append(("assistant", answer))
             pred = predict_news(user_prompt, tokenizer, model, device, backend)
-            log_prediction(user_prompt, pred["label"], pred["confidence"], pred["fake_probability"], pred["real_probability"])
+            log_prediction(
+                user_prompt,
+                pred["label"],
+                pred["confidence"],
+                pred["fake_probability"],
+                pred["real_probability"],
+            )
             st.rerun()
 
     with right_col:
