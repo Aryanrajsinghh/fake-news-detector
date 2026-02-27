@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 import torch
@@ -34,8 +36,19 @@ class NewsInput(BaseModel):
     text: str
 
 
+# Serve frontend
+FRONTEND_DIST = Path("Frontend/dist")
+if FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+
 @app.get("/")
-def root():
+def serve_frontend():
+    return FileResponse("Frontend/dist/index.html")
+
+
+@app.get("/health")
+def health():
     return {"status": "API running", "device": str(device)}
 
 
@@ -73,16 +86,21 @@ def predict_news(input_data: NewsInput):
         outputs = model(**inputs)
         probs = torch.softmax(outputs.logits, dim=1).cpu().numpy()[0]
 
-    # Matches train_bert.py convention: 0 = REAL, 1 = FAKE
-    real_prob = float(probs[0])
-    fake_prob = float(probs[1])
+    # probs[0]=FAKE, probs[1]=REAL based on your training
+    fake_prob = float(probs[0])
+    real_prob = float(probs[1])
 
-    label = "FAKE" if fake_prob > real_prob else "REAL"
-    confidence = max(fake_prob, real_prob)
+    is_fake = fake_prob > real_prob
+    label = "FAKE" if is_fake else "REAL"
 
+    # Frontend does its own *100 multiplication AND determines label
+    # from whichever of fake_probability/real_probability is higher.
+    # So we send raw decimals (0.0-1.0) and let frontend handle display.
+    # We also ensure fake_probability > real_probability when FAKE
+    # so the frontend's internal label logic matches reality.
     return {
         "label": label,
-        "confidence": round(confidence * 100, 2),
-        "fake_probability": round(fake_prob * 100, 2),
-        "real_probability": round(real_prob * 100, 2),
+        "confidence": round(fake_prob if is_fake else real_prob, 4),
+        "fake_probability": round(fake_prob, 4),
+        "real_probability": round(real_prob, 4),
     }
